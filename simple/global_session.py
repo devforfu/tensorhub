@@ -8,8 +8,6 @@ from collections import namedtuple, OrderedDict
 import numpy as np
 import tensorflow as tf
 from tensorflow.examples.tutorials.mnist import input_data
-from swissknife.files import SavingFolder
-from swissknife.plotting import plot_predictions
 
 from basedir import MNIST_IMAGES
 
@@ -19,9 +17,8 @@ N_INPUTS = 784
 
 class DNNClassifier:
 
-    def __init__(self, n_layers, n_units, n_classes, activation=tf.nn.elu):
-        self.n_layers = n_layers
-        self.n_units = n_units
+    def __init__(self, layers, n_classes, activation=tf.nn.elu):
+        self.layers = layers
         self.n_classes = n_classes
         self.activation = activation
         self._graph = None
@@ -41,13 +38,10 @@ class DNNClassifier:
         if graph is None:
             graph = tf.Graph()
         with graph.as_default():
-            training = tf.placeholder(tf.bool)
-            dropout = tf.placeholder(tf.float32)
-            x, y = create_inputs()
+            x, y, training, dropout = create_inputs()
             logits = build_model(
                 inputs=x,
-                layers=self.n_layers,
-                units=self.n_units,
+                layers=self.layers,
                 n_outputs=self.n_classes,
                 activation=self.activation)
             ops = create_optimizer(
@@ -126,20 +120,25 @@ def create_inputs(input_size=N_INPUTS):
     with tf.name_scope('inputs'):
         x = tf.placeholder(tf.float32, shape=(None, input_size), name='x')
         y = tf.placeholder(tf.int64, shape=(None,), name='y')
-    return x, y
+        dropout = tf.placeholder(tf.float32, name='dropout')
+        training = tf.placeholder(tf.bool, name='training')
+    return x, y, dropout, training
 
 
-def build_model(inputs, layers, units, n_outputs, activation,
-                rate=0.0, training=False):
+def build_model(inputs, layers, n_outputs, activation,
+                rate=0.0, training=False, batch_norm=False,
+                dropout=None):
 
     x = inputs
     with tf.name_scope('model'):
-        for i in range(layers):
+        for i, units in enumerate(layers):
             with tf.name_scope(f'hidden{i}'):
                 init = tf.variance_scaling_initializer(mode='fan_avg')
                 x = tf.layers.dense(x, units, kernel_initializer=init)
-                x = tf.layers.batch_normalization(x, training=training)
-                x = tf.layers.dropout(x, rate=rate)
+                if batch_norm:
+                    x = tf.layers.batch_normalization(x, training=training)
+                if dropout is not None:
+                    x = tf.layers.dropout(x, rate=rate)
                 x = activation(x)
         logits = tf.layers.dense(x, n_outputs, name='logits')
     return logits
@@ -451,6 +450,7 @@ def main():
     epochs = 500
     (x_train, y_train), validation_data, test_data = get_mnist()
     n_batches = x_train.shape[0] // bs
+    layers = [100 for _ in range(5)]
 
     batches = ArrayBatchGenerator(
         x_train, y_train, batch_size=bs, infinite=True)
@@ -460,7 +460,7 @@ def main():
         EarlyStopping(patience=10),
         StreamLogger()]
 
-    model = DNNClassifier(n_layers=5, n_units=100, n_classes=10)
+    model = DNNClassifier(layers=layers, n_classes=10)
     model.build()
     model.fit_generator(
         generator=batches,
