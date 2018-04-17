@@ -11,14 +11,12 @@ from tensorflow.examples.tutorials.mnist import input_data
 
 from basedir import MNIST_IMAGES
 
-
 N_INPUTS = 784
 
 
 class DNNClassifier:
-
-    def __init__(self, layers, n_classes, activation=tf.nn.elu):
-        self.layers = layers
+    def __init__(self, hidden_layers, n_classes, activation=tf.nn.elu):
+        self.hidden_layers = hidden_layers
         self.n_classes = n_classes
         self.activation = activation
         self._graph = None
@@ -34,6 +32,46 @@ class DNNClassifier:
     def saver(self):
         return self._saver
 
+    @property
+    def graph(self):
+        return self._graph
+
+    @staticmethod
+    def restore_model(model_dir) -> 'DNNClassifier':
+        """Restores previously saved model from file."""
+
+        graph = tf.Graph()
+        latest_checkpoint = tf.train.latest_checkpoint(model_dir)
+        meta_path = latest_checkpoint + '.meta'
+        if not exists(meta_path):
+            raise RuntimeError('cannot restore model: meta file not found')
+
+        with graph.as_default():
+            session = tf.Session(graph=graph)
+            saver = tf.train.import_meta_graph(meta_path)
+            saver.restore(session, latest_checkpoint)
+            hidden_layers = (
+                graph.
+                    get_collection('variables', 'dense\d/kernel'))
+            activation_type = (
+                graph.
+                    get_operation_by_name('model/activation1').
+                    type.lower())
+            n_outputs = (
+                graph.
+                    get_tensor_by_name('logits/kernel:0').
+                    get_shape().as_list()[1])
+            activation = getattr(tf.nn, activation_type)
+            classifier = DNNClassifier(
+                hidden_layers=len(hidden_layers),
+                n_classes=n_outputs,
+                activation=activation)
+            classifier._saver = saver
+            classifier._graph = graph
+            classifier._session = session
+
+        return classifier
+
     def build(self, graph=None, optimizer=None):
         if graph is None:
             graph = tf.Graph()
@@ -41,7 +79,7 @@ class DNNClassifier:
             x, y, training, dropout = create_inputs()
             logits = build_model(
                 inputs=x,
-                layers=self.layers,
+                layers=self.hidden_layers,
                 n_outputs=self.n_classes,
                 activation=self.activation)
             ops = create_optimizer(
@@ -128,18 +166,18 @@ def create_inputs(input_size=N_INPUTS):
 def build_model(inputs, layers, n_outputs, activation,
                 rate=0.0, training=False, batch_norm=False,
                 dropout=None):
-
     x = inputs
     with tf.name_scope('model'):
         for i, units in enumerate(layers):
-            with tf.name_scope(f'hidden{i}'):
-                init = tf.variance_scaling_initializer(mode='fan_avg')
-                x = tf.layers.dense(x, units, kernel_initializer=init)
-                if batch_norm:
-                    x = tf.layers.batch_normalization(x, training=training)
-                if dropout is not None:
-                    x = tf.layers.dropout(x, rate=rate)
-                x = activation(x)
+            init = tf.variance_scaling_initializer(mode='fan_avg')
+            x = tf.layers.dense(
+                x, units, kernel_initializer=init, name=f'dense{i}')
+            if batch_norm:
+                x = tf.layers.batch_normalization(
+                    x, training=training, name=f'batchnorm{i}')
+            if dropout is not None:
+                x = tf.layers.dropout(x, rate=rate, name=f'dropout{i}')
+            x = activation(x, name=f'activation{i}')
         logits = tf.layers.dense(x, n_outputs, name='logits')
     return logits
 
@@ -186,7 +224,6 @@ def add_to_collection(name, *ops):
 
 
 class Callback:
-
     def __init__(self):
         self.observed_model = None
 
@@ -207,7 +244,6 @@ class Callback:
 
 
 class CallbacksGroup(Callback):
-
     def __init__(self, callbacks):
         super().__init__()
         self.callbacks = list(callbacks)
@@ -234,7 +270,6 @@ class CallbacksGroup(Callback):
 
 
 class ModelSaver(Callback):
-
     _checkpoint_format = 'checkpoint_val_loss_{val_loss:2.4f}_epoch_{epoch:d}'
 
     def __init__(self,
@@ -258,6 +293,16 @@ class ModelSaver(Callback):
         self.observed_model = None
         self._op = lt if self.minimize else gt
         self._best_value = np.infty if self.minimize else -np.infty
+        self._best_checkpoint = None
+        self._final_model = None
+
+    @property
+    def best_checkpoint(self):
+        return self._best_checkpoint
+
+    @property
+    def final_model(self):
+        return self._final_model
 
     def on_start_training(self):
         """
@@ -280,6 +325,7 @@ class ModelSaver(Callback):
         path = join(self.model_dir, filename)
         session = self.observed_model.session
         self.observed_model.saver.save(session, path)
+        self._best_checkpoint = path
 
     def on_end_training(self):
         """
@@ -290,13 +336,13 @@ class ModelSaver(Callback):
             path = join(self.model_dir, self.model_name + '.final')
             session = self.observed_model.session
             self.observed_model.saver.save(session, path)
+            self._final_model = path
 
     def _not_better(self, a, b):
         return not self._op(a, b)
 
 
 class EarlyStopping(Callback):
-
     def __init__(self, metric='val_loss', minimize=True, patience=10):
         super().__init__()
         self.metric = metric
@@ -327,7 +373,6 @@ class EarlyStopping(Callback):
 
 
 class StreamLogger(Callback):
-
     def __init__(self, output=sys.stdout, stats_formats=None):
         super().__init__()
 
@@ -364,7 +409,6 @@ class StreamLogger(Callback):
 
 
 class ArrayBatchGenerator:
-
     def __init__(self, *arrays, same_size_batches=False,
                  batch_size=32, infinite=False):
 
@@ -447,8 +491,8 @@ def get_mnist(from_digit=None, to_digit=None):
 
 def main():
     bs = 1000
-    epochs = 500
-    (x_train, y_train), validation_data, test_data = get_mnist()
+    epochs = 3
+    (x_train, y_train), validation_data, test_data = get_mnist(0, 4)
     n_batches = x_train.shape[0] // bs
     layers = [100 for _ in range(5)]
 
@@ -460,7 +504,7 @@ def main():
         EarlyStopping(patience=10),
         StreamLogger()]
 
-    model = DNNClassifier(layers=layers, n_classes=10)
+    model = DNNClassifier(hidden_layers=layers, n_classes=5)
     model.build()
     model.fit_generator(
         generator=batches,
@@ -468,7 +512,10 @@ def main():
         batches_per_epoch=n_batches,
         validation_data=validation_data,
         callbacks=callbacks)
-    scores = model.score(*test_data)
+
+    restored = DNNClassifier.restore_model('/home/ck/tf_output/dnn_5_100')
+    assert restored is not model
+    scores = restored.score(*test_data)
     print('Test dataset scores: {loss:2.6f} - {accuracy:2.2%}'.format(**scores))
 
 
